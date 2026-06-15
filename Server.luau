@@ -1,166 +1,136 @@
+--!strict
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Promise = require(ReplicatedStorage.Packages.Promise)
 
-local INIT_AND_START_IGNORE = {}
-local PREFIX = "[Server]: "
-local LOGGING_ENABLED = true
-local LOG_LEVEL = 1
+const IGNORED_MODULES_AND_DIRECTORIES = {}
+const METHODS_TO_EXECUTE = {
+	[1] = "Init",
+	[2] = "Start",
+}
 
-local LoadedModules = {}
+const PREFIX = "[Client] "
+const DEBUG_LEVEL = 0
 
-local function log(msg: any, logLevel: number)
-	if LOGGING_ENABLED ~= true then
-		return
+const READY_ATTRIBUTE_NAME = "IsReady"
+
+type ModuleName = string
+type ModuleTable = {}
+
+local Modules = script:GetDescendants()
+local LoadedModules = {} :: { [ModuleName]: ModuleTable }
+
+local function log(msg: string, debugLevel: number)
+	if DEBUG_LEVEL >= debugLevel then
+		print(PREFIX .. msg)
 	end
-
-	if LOG_LEVEL < logLevel then
-		return
-	end
-
-	print(PREFIX, msg)
 end
 
-function InitAndStartLoadedModules()
-	local function promiseModuleMethod(moduleInstance: ModuleScript, moduleCache: {}, methodName: string)
-		if typeof(moduleCache[methodName]) ~= "function" then
-			return nil
-		end
-
-		return Promise.new(function(resolve, reject)
-			log(`{moduleInstance.Name} | {methodName} | [?]`, 3)
-			local success, errorMsg = pcall(moduleCache[methodName], moduleCache)
-			log(`{moduleInstance.Name} | {methodName} | [+]`, 3)
-
-			if not success then
-				reject(errorMsg)
-				return
-			end
-
-			resolve()
-		end)
-			:andThen(function()
-				log(`{methodName}ed {moduleInstance.Name}`, 3)
-			end)
-			:catch(function(errorMsg: string)
-				log(`Not {methodName}ed {moduleInstance.Name}. Error: {errorMsg}`, 3)
-			end)
+local function checkModule(module: ModuleScript): boolean
+	if not module:IsA("ModuleScript") then
+		return false
 	end
 
-	local function getUnignoreModules()
-		if table.maxn(INIT_AND_START_IGNORE) == 0 then
-			return LoadedModules
+	-- // Check if the module is in the ignored list
+	if table.find(IGNORED_MODULES_AND_DIRECTORIES, module.Name) then
+		return false
+	end
+
+	-- // Check if one of the ignored directories is an ancestor of the module
+	for _, ignoredDirectory in IGNORED_MODULES_AND_DIRECTORIES do
+		if type(ignoredDirectory) == "string" then
+			if module:FindFirstAncestor(ignoredDirectory) then
+				return false
+			end
 		end
 
-		local unignoreModules = {}
-		for moduleInstance, moduleCache in LoadedModules do
-			local ignore = false
-			for _, ignoreModuleOrFolder in INIT_AND_START_IGNORE do
-				if moduleInstance:IsDescendantOf(ignoreModuleOrFolder) then
-					ignore = true
-					break
+		if typeof(ignoredDirectory) == "Instance" then
+			if module:IsDescendantOf(ignoredDirectory) then
+				return false
+			end
+		end
+	end
+
+	return true
+end
+
+local function main()
+	local modulesToLoad = {}
+	for _, module: ModuleScript in Modules do
+		if not checkModule(module) then
+			continue
+		end
+
+		table.insert(modulesToLoad, module)
+	end
+
+	log("Module loading started", 1)
+
+	-- // Cache all modules
+	do
+		local loadingPromises = {}
+
+		for _, module: ModuleScript in modulesToLoad do
+			local loadingPromise = Promise.new(function(resolve, reject)
+				local success, cached = pcall(require, module)
+
+				if success then
+					resolve(cached)
+				else
+					reject(cached)
 				end
+			end)
+				:andThen(function(cached)
+					LoadedModules[module.Name] = cached
+					log(`Loaded module: {module.Name}`, 1)
+				end)
+				:catch(function(err)
+					log(`Failed to load module: {module.Name} - {tostring(err)}`, 1)
+				end)
 
-				if moduleInstance == ignoreModuleOrFolder then
-					ignore = true
-					break
+			table.insert(loadingPromises, loadingPromise)
+		end
+
+		Promise.all(loadingPromises):await()
+	end
+
+	-- // Execute methods on loaded modules
+	for _, method in ipairs(METHODS_TO_EXECUTE) do
+		local executionPromises = {}
+
+		for moduleName, moduleTable in LoadedModules do
+			if type(moduleTable) ~= "table" then
+				continue
+			end
+
+			if type(moduleTable[method]) ~= "function" then
+				continue
+			end
+
+			local methodExecutionPromise = Promise.new(function(resolve, reject)
+				local success, result = pcall(moduleTable[method])
+				if success then
+					resolve(result)
+				else
+					reject(result)
 				end
-			end
+			end)
+				:andThen(function()
+					log(`Executed method: {method} in module: {moduleName}`, 1)
+				end)
+				:catch(function(err)
+					log(`Failed to execute method: {method} in module: {moduleName} - {tostring(err)}`, 1)
+				end)
 
-			if not ignore then
-				unignoreModules[moduleInstance] = moduleCache
-			end
+			table.insert(executionPromises, methodExecutionPromise)
 		end
 
-		return unignoreModules
+		Promise.all(executionPromises):await()
 	end
-
-	local function initModules()
-		local initPromises = {}
-
-		for moduleInstance, moduleCache in getUnignoreModules() do
-			if type(moduleCache) ~= "table" then
-				continue
-			end
-
-			local initPromise = promiseModuleMethod(moduleInstance, moduleCache, "Init")
-			if not initPromise then
-				continue
-			end
-
-			table.insert(initPromises, initPromise)
-
-			log(`{#initPromises}`, 3)
-		end
-
-		log(initPromises, 3)
-
-		Promise.all(initPromises):await()
-	end
-
-	local function startModules()
-		local startPromises = {}
-
-		for moduleInstance, moduleCache in getUnignoreModules() do
-			if type(moduleCache) ~= "table" then
-				continue
-			end
-
-			local startPromise = promiseModuleMethod(moduleInstance, moduleCache, "Start")
-			if not startPromise then
-				continue
-			end
-
-			table.insert(startPromises, startPromise)
-
-			log(`{#startPromises}`, 3)
-		end
-
-		log(startPromises, 3)
-
-		Promise.all(startPromises):await()
-	end
-
-	Promise.promisify(initModules)():await()
-	Promise.promisify(startModules)():await()
 end
 
-function LoadModules()
-	local function attemptRequire(module: ModuleScript)
-		return Promise.new(function(resolve, reject)
-			local success, cached = pcall(require, module)
-
-			if success then
-				resolve(cached)
-			else
-				reject()
-			end
-		end)
-	end
-
-	local requirePromises = {}
-	for _, module in script:GetDescendants() do
-		if module:IsA("ModuleScript") then
-			local sTime = tick()
-			table.insert(
-				requirePromises,
-				attemptRequire(module)
-					:andThen(function(cached: {})
-						LoadedModules[module] = cached
-						log(`Successfully loaded module "{module.Name}"! Time elapsed: {tick() - sTime}`, 1)
-					end)
-					:catch(function(errorMsg: string)
-						log(`Error occured while trying to require module "{module.Name}": {errorMsg}`, 1)
-					end)
-			)
-		end
-	end
-
-	log(requirePromises, 3)
-	Promise.all(requirePromises):await()
+if not workspace:GetAttribute(READY_ATTRIBUTE_NAME) then
+	workspace:GetAttributeChangedSignal(READY_ATTRIBUTE_NAME):Wait()
 end
 
-LoadModules()
-InitAndStartLoadedModules()
-
-workspace:SetAttribute("IsReady", true)
+main()
