@@ -9,7 +9,7 @@ const METHODS_TO_EXECUTE = {
 	[2] = "Start",
 }
 
-const PREFIX = "[Client] "
+const PREFIX = "[Server] "
 const DEBUG_LEVEL = 0
 
 const READY_ATTRIBUTE_NAME = "IsReady"
@@ -127,10 +127,10 @@ local function main()
 
 		Promise.all(executionPromises):await()
 	end
+
+	workspace:SetAttribute(READY_ATTRIBUTE_NAME, true)
 end
 
-if not workspace:GetAttribute(READY_ATTRIBUTE_NAME) then
-	workspace:GetAttributeChangedSignal(READY_ATTRIBUTE_NAME):Wait()
-end
+workspace:SetAttribute(READY_ATTRIBUTE_NAME, false)
 
 main()
